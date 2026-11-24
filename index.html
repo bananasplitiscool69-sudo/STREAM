@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stage Live</title>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;800&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+:root{--bg:#14121f;--panel:#1d1a2e;--line:#2e2a47;--text:#ebe9f7;--dim:#9a96b8;--accent:#5865f2;--live:#ed4245;color-scheme:dark}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--text);font:15px/1.5 Sora,system-ui,sans-serif}
+button,input,select{font:inherit;color:inherit}
+button{background:var(--accent);border:0;border-radius:8px;padding:10px 16px;cursor:pointer;font-weight:600}
+button.alt{background:var(--line)}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #fff;outline-offset:2px}
+input,select{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px 12px;width:100%}
+.screen{display:none;height:100%}
+.screen.on{display:block}
+.center{display:grid;place-items:center;height:100%;padding:20px}
+.box{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:28px;width:min(440px,100%)}
+h1{font-size:34px;font-weight:800;margin:0 0 4px;letter-spacing:-1px}
+h2{font-size:18px;margin:20px 0 8px}
+p{color:var(--dim);margin:0 0 14px}
+.row{display:flex;gap:8px;margin-bottom:10px}
+.row>*{flex:1}
+label{display:block;font-size:13px;color:var(--dim);margin:10px 0 4px}
+.stage{display:grid;grid-template-columns:1fr 320px;height:100%}
+.main{display:flex;flex-direction:column;padding:16px;min-width:0}
+.top{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.top b{font-size:18px}
+.badge{background:var(--live);border-radius:6px;padding:2px 10px;font-size:12px;font-weight:800}
+.badge.off{background:var(--line);color:var(--dim)}
+.vwrap{position:relative;flex:1;min-height:0;background:#000;border-radius:14px;overflow:hidden;border:1px solid var(--line)}
+video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
+.msg{position:absolute;inset:0;display:grid;place-items:center;text-align:center;color:var(--dim);padding:20px}
+.msg button{margin-top:10px}
+.share{display:flex;gap:8px;margin-top:12px}
+.side{background:var(--panel);border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+.aud{padding:14px 16px;border-bottom:1px solid var(--line);max-height:30%;overflow:auto}
+.aud span{display:inline-block;background:var(--bg);border:1px solid var(--line);border-radius:20px;padding:2px 10px;margin:0 6px 6px 0;font-size:13px}
+.aud span.host{border-color:var(--accent)}
+.chat{flex:1;overflow:auto;padding:12px 16px}
+.chat div{margin-bottom:8px;word-break:break-word}
+.chat b{color:#a5acff}.chat .sys{color:var(--dim);font-style:italic}
+.send{display:flex;gap:8px;padding:12px;border-top:1px solid var(--line)}
+.err{color:#ff8a8c;min-height:20px;font-size:14px}
+#hostPrev{width:100%;aspect-ratio:16/9;border-radius:10px;background:#000;margin-top:8px}
+@media(max-width:800px){.stage{grid-template-columns:1fr;grid-template-rows:55% 45%}.side{border-left:0;border-top:1px solid var(--line)}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+
+<div id="home" class="screen on"><div class="center"><div class="box">
+  <h1>Stage Live</h1>
+  <p>Stream from OBS. Everyone watches in the browser.</p>
+  <label for="code">Watch a stream</label>
+  <div class="row"><input id="code" placeholder="Room code" autocomplete="off"><button id="watchBtn">Watch</button></div>
+  <h2>Stream yourself</h2>
+  <button id="hostBtn" class="alt" style="width:100%">Set up my stream</button>
+</div></div></div>
+
+<div id="setup" class="screen"><div class="center"><div class="box">
+  <h1>Pick your source</h1>
+  <p>For OBS, start the Virtual Camera and choose it below.</p>
+  <label for="vsel">Video</label><select id="vsel"></select>
+  <label for="asel">Audio</label><select id="asel"></select>
+  <video id="hostPrev" muted autoplay playsinline></video>
+  <div class="row" style="margin-top:12px"><button id="screenBtn" class="alt">Share screen instead</button><button id="liveBtn">Go live</button></div>
+  <div class="err" id="setupErr"></div>
+</div></div></div>
+
+<div id="room" class="screen"><div class="stage">
+  <div class="main">
+    <div class="top"><b id="title">Stage</b><span class="badge off" id="badge">Connecting</span></div>
+    <div class="vwrap"><video id="vid" autoplay playsinline muted></video><div class="msg" id="vmsg"></div></div>
+    <div class="share" id="shareRow" hidden><input id="link" readonly aria-label="Watch link"><button id="copyBtn">Copy link</button></div>
+  </div>
+  <div class="side">
+    <div class="aud" id="aud"></div>
+    <div class="chat" id="chat" aria-live="polite"></div>
+    <div class="send"><input id="chatIn" placeholder="Send a message" maxlength="300" autocomplete="off"><button id="sendBtn">Send</button></div>
+  </div>
+</div></div>
+
+<script>
+const $=id=>document.getElementById(id);
+const PREFIX='stagelive-',MAX_VIEWERS=8;
+let peer,stream,isHost=false,myName='Viewer',viewers=new Map();
+
+function show(id){document.querySelectorAll('.screen').forEach(s=>s.classList.toggle('on',s.id===id))}
+function addMsg(name,text,sys){const d=document.createElement('div');if(sys){d.className='sys';d.textContent=text}else{const b=document.createElement('b');b.textContent=name+': ';d.append(b,document.createTextNode(text))}const c=$('chat');c.append(d);c.scrollTop=c.scrollHeight}
+function setBadge(t,live){$('badge').textContent=t;$('badge').classList.toggle('off',!live)}
+function renderAud(list){const a=$('aud');a.textContent='';list.forEach(u=>{const s=document.createElement('span');s.textContent=u.name;if(u.host)s.className='host';a.append(s)})}
+
+/* ---------- Host ---------- */
+async function listDevices(){
+  try{const t=await navigator.mediaDevices.getUserMedia({video:true,audio:true});t.getTracks().forEach(x=>x.stop())}catch(e){}
+  const d=await navigator.mediaDevices.enumerateDevices();
+  const fill=(el,kind,none)=>{el.textContent='';if(none){const o=document.createElement('option');o.value='';o.textContent=none;el.append(o)}d.filter(x=>x.kind===kind).forEach(x=>{const o=document.createElement('option');o.value=x.deviceId;o.textContent=x.label||kind;el.append(o)})};
+  fill($('vsel'),'videoinput');fill($('asel'),'audioinput','No audio');
+  const obs=[...$('vsel').options].find(o=>/obs/i.test(o.textContent));if(obs)$('vsel').value=obs.value;
+}
+async function preview(){
+  $('setupErr').textContent='';
+  try{
+    stream&&stream.getTracks().forEach(t=>t.stop());
+    const v=$('vsel').value,a=$('asel').value;
+    stream=await navigator.mediaDevices.getUserMedia({video:v?{deviceId:{exact:v},width:{ideal:1280},height:{ideal:720},frameRate:{ideal:30}}:true,audio:a?{deviceId:{exact:a},echoCancellation:false,noiseSuppression:false}:false});
+    $('hostPrev').srcObject=stream;
+  }catch(e){$('setupErr').textContent='Could not open that source: '+e.message}
+}
+async function shareScreen(){
+  $('setupErr').textContent='';
+  try{stream&&stream.getTracks().forEach(t=>t.stop());stream=await navigator.mediaDevices.getDisplayMedia({video:true,audio:true});$('hostPrev').srcObject=stream}
+  catch(e){$('setupErr').textContent='Screen share cancelled.'}
+}
+function capBitrate(call){setTimeout(()=>{try{call.peerConnection.getSenders().forEach(s=>{if(s.track&&s.track.kind==='video'){const p=s.getParameters();p.encodings=p.encodings&&p.encodings.length?p.encodings:[{}];p.encodings[0].maxBitrate=2500000;s.setParameters(p).catch(()=>{})}})}catch(e){}},1500)}
+function broadcast(m){viewers.forEach(v=>v.conn.open&&v.conn.send(m))}
+function pushAudience(){const list=[{name:'Host',host:true},...[...viewers.values()].filter(v=>v.name).map(v=>({name:v.name}))];renderAud(list);broadcast({t:'users',list})}
+function goLive(code,tries){
+  peer=new Peer(PREFIX+code);
+  peer.on('error',e=>{if(e.type==='unavailable-id'&&tries<4){peer.destroy();goLive(Math.random().toString(36).slice(2,8),tries+1)}else addMsg('','Connection problem: '+e.type,true)});
+  peer.on('open',()=>{
+    const url=location.origin+location.pathname+'?room='+code;
+    $('title').textContent='Room '+code;$('link').value=url;$('shareRow').hidden=false;
+    setBadge('Live',true);$('vmsg').hidden=true;
+    $('vid').srcObject=stream;$('vid').muted=true;
+    renderAud([{name:'Host',host:true}]);addMsg('','You are live. Share the link above.',true);
+  });
+  peer.on('connection',c=>{
+    c.on('open',()=>{
+      if(viewers.size>=MAX_VIEWERS){c.send({t:'full'});setTimeout(()=>c.close(),300);return}
+      viewers.set(c.peer,{conn:c,name:''});
+    });
+    c.on('data',d=>{
+      const v=viewers.get(c.peer);if(!v)return;
+      if(d.t==='join'){
+        v.name=String(d.name||'Viewer').slice(0,20);
+        const call=peer.call(c.peer,stream);capBitrate(call);
+        broadcast({t:'chat',sys:true,text:v.name+' joined'});addMsg('',v.name+' joined',true);pushAudience();
+      }else if(d.t==='chat'){
+        const text=String(d.text||'').slice(0,300);if(!text)return;
+        addMsg(v.name,text);broadcast({t:'chat',name:v.name,text});
+      }
+    });
+    c.on('close',()=>{const v=viewers.get(c.peer);viewers.delete(c.peer);if(v&&v.name){broadcast({t:'chat',sys:true,text:v.name+' left'});addMsg('',v.name+' left',true)}pushAudience()});
+  });
+}
+
+/* ---------- Viewer ---------- */
+function onData(d){
+  if(d.t==='chat')addMsg(d.name,d.text,d.sys);
+  else if(d.t==='users')renderAud(d.list);
+  else if(d.t==='full'){$('vmsg').textContent='This stage is full right now (max '+MAX_VIEWERS+' viewers).';setBadge('Full',false)}
+}
+function watch(code,name){
+  show('room');$('title').textContent='Room '+code;
+  $('vmsg').textContent='Joining…';setBadge('Connecting',false);
+  peer=new Peer();
+  peer.on('error',e=>{$('vmsg').textContent=e.type==='peer-unavailable'?'This stream is not live. Check the room code.':'Connection problem: '+e.type;setBadge('Offline',false)});
+  peer.on('call',call=>{
+    call.answer();
+    call.on('stream',s=>{
+      $('vid').srcObject=s;$('vid').play().catch(()=>{});
+      $('vmsg').hidden=false;$('vmsg').textContent='';
+      const b=document.createElement('button');b.textContent='Unmute';
+      b.onclick=()=>{$('vid').muted=false;$('vmsg').hidden=true};
+      $('vmsg').append(b);setBadge('Live',true);
+    });
+  });
+  peer.on('open',()=>{
+    const c=peer.connect(PREFIX+code,{reliable:true});
+    c.on('open',()=>{c.send({t:'join',name});window._conn=c});
+    c.on('data',onData);
+    c.on('close',()=>{$('vmsg').hidden=false;$('vmsg').textContent='The stream has ended.';setBadge('Ended',false)});
+  });
+}
+function sendChat(){
+  const t=$('chatIn').value.trim();if(!t)return;$('chatIn').value='';
+  if(isHost){addMsg('Host',t);broadcast({t:'chat',name:'Host',text:t})}
+  else if(window._conn&&window._conn.open){window._conn.send({t:'chat',text:t})}
+}
+
+/* ---------- Wiring ---------- */
+$('hostBtn').onclick=async()=>{isHost=true;show('setup');await listDevices();preview()};
+$('vsel').onchange=$('asel').onchange=preview;
+$('screenBtn').onclick=shareScreen;
+$('liveBtn').onclick=()=>{if(!stream){$('setupErr').textContent='Pick a source first.';return}show('room');goLive(Math.random().toString(36).slice(2,8),0)};
+$('watchBtn').onclick=()=>{const c=$('code').value.trim().toLowerCase();if(!c)return;const n=prompt('Your name for chat?','Viewer')||'Viewer';myName=n.slice(0,20);watch(c,myName)};
+$('code').onkeydown=e=>{if(e.key==='Enter')$('watchBtn').click()};
+$('sendBtn').onclick=sendChat;
+$('chatIn').onkeydown=e=>{if(e.key==='Enter')sendChat()};
+$('copyBtn').onclick=()=>{navigator.clipboard.writeText($('link').value).then(()=>{$('copyBtn').textContent='Copied'})};
+const room=new URLSearchParams(location.search).get('room');
+if(room){const n=prompt('Your name for chat?','Viewer')||'Viewer';watch(room.toLowerCase(),n.slice(0,20))}
+</script>
+</body>
+</html>
