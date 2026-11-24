@@ -76,6 +76,8 @@ video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
   <p>The OBS Virtual Camera has no sound. Pick a mic or virtual audio cable below, or share a tab/screen with audio.</p>
   <label for="vsel">Video</label><select id="vsel"></select>
   <label for="asel">Audio</label><select id="asel"></select>
+  <label for="qsel">Quality</label>
+  <select id="qsel"><option value="720p30">720p 30fps (light on upload)</option><option value="1080p30" selected>1080p 30fps (recommended)</option><option value="1080p60">1080p 60fps (needs fast upload)</option></select>
   <video id="hostPrev" muted autoplay playsinline></video>
   <div class="meter" aria-hidden="true"><i id="meterBar"></i></div>
   <div class="astat" id="astat"></div>
@@ -103,6 +105,8 @@ const PREFIX='stagelive-',MAX_VIEWERS=8;
 let peer,stream,isHost=false,myName='Viewer',viewers=new Map();
 let meterCtx=null,meterRaf=0,mixCtx=null;
 
+const QUALITY={'720p30':{w:1280,h:720,f:30,b:3500000},'1080p30':{w:1920,h:1080,f:30,b:6000000},'1080p60':{w:1920,h:1080,f:60,b:9000000}};
+const Q=()=>QUALITY[$('qsel').value]||QUALITY['1080p30'];
 function show(id){document.querySelectorAll('.screen').forEach(s=>s.classList.toggle('on',s.id===id))}
 function addMsg(name,text,sys){const d=document.createElement('div');if(sys){d.className='sys';d.textContent=text}else{const b=document.createElement('b');b.textContent=name+': ';d.append(b,document.createTextNode(text))}const c=$('chat');c.append(d);c.scrollTop=c.scrollHeight}
 function setBadge(t,live){$('badge').textContent=t;$('badge').classList.toggle('off',!live)}
@@ -172,7 +176,7 @@ async function preview(){
     stream&&stream.getTracks().forEach(t=>t.stop());
     const v=$('vsel').value,a=$('asel').value;
     stream=await navigator.mediaDevices.getUserMedia({
-      video:v?{deviceId:{exact:v},width:{ideal:1280},height:{ideal:720},frameRate:{ideal:30}}:true,
+      video:v?{deviceId:{exact:v},width:{ideal:Q().w},height:{ideal:Q().h},frameRate:{ideal:Q().f}}:true,
       audio:a?{deviceId:{exact:a},echoCancellation:false,noiseSuppression:false,autoGainControl:false,channelCount:2}:false
     });
     $('hostPrev').srcObject=stream;
@@ -191,7 +195,7 @@ async function shareScreen(){
   $('setupErr').textContent='';
   try{
     stopMeter();
-    const disp=await navigator.mediaDevices.getDisplayMedia({video:true,audio:true});
+    const disp=await navigator.mediaDevices.getDisplayMedia({video:{width:{ideal:Q().w},height:{ideal:Q().h},frameRate:{ideal:Q().f}},audio:true});
     let mic=null;
     const a=$('asel').value;
     if(a){try{mic=await navigator.mediaDevices.getUserMedia({audio:{deviceId:{exact:a},echoCancellation:true,noiseSuppression:true}})}catch(e){}}
@@ -215,7 +219,7 @@ function capBitrate(call){
   setTimeout(()=>{try{call.peerConnection.getSenders().forEach(s=>{
     if(!s.track)return;
     const p=s.getParameters();p.encodings=p.encodings&&p.encodings.length?p.encodings:[{}];
-    if(s.track.kind==='video')p.encodings[0].maxBitrate=2500000;
+    if(s.track.kind==='video'){p.encodings[0].maxBitrate=Q().b;p.degradationPreference='maintain-resolution'}
     else p.encodings[0].maxBitrate=128000;
     s.setParameters(p).catch(()=>{});
   })}catch(e){}},1500);
@@ -315,12 +319,13 @@ async function setupHost(){
 }
 $('hostBtn').onclick=()=>{isHost=true;setupHost()};
 $('retryBtn').onclick=setupHost;
-$('vsel').onchange=$('asel').onchange=preview;
+$('vsel').onchange=$('asel').onchange=$('qsel').onchange=preview;
 $('screenBtn').onclick=shareScreen;
 $('liveBtn').onclick=()=>{
   if(!stream){$('setupErr').textContent='Pick a source first.';return}
   if(!stream.getAudioTracks().length&&!confirm('There is no audio in this stream, so viewers will hear nothing. Go live anyway?'))return;
   stopMeter();
+  stream.getVideoTracks().forEach(t=>{try{t.contentHint='motion'}catch(e){}});
   show('room');goLive(Math.random().toString(36).slice(2,8),0);
 };
 $('watchBtn').onclick=()=>{const c=$('code').value.trim().toLowerCase();if(!c)return;const n=prompt('Your name for chat?','Viewer')||'Viewer';myName=n.slice(0,20);watch(c,myName)};
