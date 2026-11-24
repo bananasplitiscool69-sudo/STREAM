@@ -15,6 +15,7 @@ body{background:var(--bg);color:var(--text);font:15px/1.5 Sora,system-ui,sans-se
 button,input,select{font:inherit;color:inherit}
 button{background:var(--accent);border:0;border-radius:8px;padding:10px 16px;cursor:pointer;font-weight:600}
 button.alt{background:var(--line)}
+button:disabled{opacity:.5;cursor:default}
 [hidden]{display:none!important}
 .top .sp{flex:1}
 .top button{padding:6px 12px;font-size:13px}
@@ -47,6 +48,7 @@ video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
 .aud{padding:14px 16px;border-bottom:1px solid var(--line);max-height:30%;overflow:auto}
 .aud span{display:inline-block;background:var(--bg);border:1px solid var(--line);border-radius:20px;padding:2px 10px;margin:0 6px 6px 0;font-size:13px}
 .aud span.host{border-color:var(--accent)}
+.aud span.cnt{border:0;background:none;color:var(--dim);padding-left:0}
 .chat{flex:1;overflow:auto;padding:12px 16px}
 .chat div{margin-bottom:8px;word-break:break-word}
 .chat b{color:#a5acff}.chat .sys{color:var(--dim);font-style:italic}
@@ -119,7 +121,9 @@ video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
 
 <script>
 const $=id=>document.getElementById(id);
-const PREFIX='stagelive-',MAX_VIEWERS=8;
+/* Relay tree: host feeds MAX_DIRECT viewers, each relay viewer feeds RELAY_KIDS more.
+   4 + 8 + 16 + 32 + 64 + 128 = 252 slots over 6 levels, so 200 fits. */
+const PREFIX='stagelive-',MAX_VIEWERS=200,MAX_DIRECT=4,RELAY_KIDS=2,RELAY_BITRATE=3000000;
 let peer,stream,isHost=false,myName='Viewer',viewers=new Map();
 let meterCtx=null,meterRaf=0,mixCtx=null;
 
@@ -189,9 +193,9 @@ function unlistStream(){
 const QUALITY={'720p30':{w:1280,h:720,f:30,b:4000000},'1080p30':{w:1920,h:1080,f:30,b:8000000},'1080p60':{w:1920,h:1080,f:60,b:12000000},'1440p30':{w:2560,h:1440,f:30,b:14000000}};
 const Q=()=>QUALITY[$('qsel').value]||QUALITY['1080p30'];
 function show(id){document.querySelectorAll('.screen').forEach(s=>s.classList.toggle('on',s.id===id))}
-function addMsg(name,text,sys){const d=document.createElement('div');if(sys){d.className='sys';d.textContent=text}else{const b=document.createElement('b');b.textContent=name+': ';d.append(b,document.createTextNode(text))}const c=$('chat');c.append(d);c.scrollTop=c.scrollHeight}
+function addMsg(name,text,sys){const d=document.createElement('div');if(sys){d.className='sys';d.textContent=text}else{const b=document.createElement('b');b.textContent=name+': ';d.append(b,document.createTextNode(text))}const c=$('chat');c.append(d);while(c.children.length>300)c.firstChild.remove();c.scrollTop=c.scrollHeight}
 function setBadge(t,live){$('badge').textContent=t;$('badge').classList.toggle('off',!live)}
-function renderAud(list){const a=$('aud');a.textContent='';list.forEach(u=>{const s=document.createElement('span');s.textContent=u.name;if(u.host)s.className='host';a.append(s)})}
+function renderAud(list){const a=$('aud');a.textContent='';const n=document.createElement('span');n.className='cnt';n.textContent=list.length+' here';a.append(n);list.forEach(u=>{const s=document.createElement('span');s.textContent=u.name;if(u.host)s.className='host';a.append(s)})}
 
 /* ---------- Audio level meter (host setup) ---------- */
 function stopMeter(){
@@ -251,7 +255,7 @@ function permMsg(errs){
   return errs.map(e=>e.what+' '+(hints[e.name]||e.name)).join('. ')+'.';
 }
 
-/* ---------- Host ---------- */
+/* ---------- Host: devices ---------- */
 async function listDevices(){
   const errs=[];
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
@@ -324,18 +328,20 @@ async function shareScreen(){
     if(!disp.getAudioTracks().length&&!mic)$('setupErr').textContent='No tab/system audio was shared. Tick "Share audio" in the browser prompt, or pick a mic.';
   }catch(e){$('setupErr').textContent='Screen share cancelled.'}
 }
-function capBitrate(call){
+
+/* ---------- Sending helpers (bitrate is a parameter: host and relays differ) ---------- */
+function capBitrate(call,b){
   setTimeout(()=>{try{call.peerConnection.getSenders().forEach(s=>{
     if(!s.track)return;
     const p=s.getParameters();p.encodings=p.encodings&&p.encodings.length?p.encodings:[{}];
-    if(s.track.kind==='video'){p.encodings[0].maxBitrate=Q().b;p.degradationPreference='maintain-resolution'}
+    if(s.track.kind==='video'){p.encodings[0].maxBitrate=b;p.degradationPreference='maintain-resolution'}
     else p.encodings[0].maxBitrate=128000;
     s.setParameters(p).catch(()=>{});
   })}catch(e){}},1500);
 }
 /* Ask Chrome to start near the target bitrate instead of ramping up slowly. */
-function boostSdp(sdp){
-  const k=Math.round(Q().b/1000);
+function boostSdp(sdp,b){
+  const k=Math.round(b/1000);
   return sdp.replace(/a=fmtp:\d+ [^\r\n]*/g,m=>/apt=|useinbandfec/.test(m)?m:m+';x-google-min-bitrate='+Math.round(k/2)+';x-google-start-bitrate='+Math.round(k*0.8)+';x-google-max-bitrate='+k);
 }
 /* VP9 looks better per bit; for 60fps use H264 (usually hardware encoded). */
@@ -347,8 +353,40 @@ function preferCodec(call){
     call.peerConnection.getTransceivers().forEach(t=>{if(t.sender&&t.sender.track&&t.sender.track.kind==='video')t.setCodecPreferences(sorted)});
   }catch(e){}
 }
+
+/* ---------- Host: relay tree ---------- */
 function broadcast(m){viewers.forEach(v=>v.conn.open&&v.conn.send(m))}
-function pushAudience(){publishNow&&publishNow();const list=[{name:'Host',host:true},...[...viewers.values()].filter(v=>v.name).map(v=>({name:v.name}))];renderAud(list);broadcast({t:'users',list})}
+let audTimer=0;
+function pushAudience(){
+  publishNow&&publishNow();
+  /* debounced: a surge of joins sends one list, not one per join */
+  clearTimeout(audTimer);
+  audTimer=setTimeout(()=>{
+    const list=[{name:'Host',host:true},...[...viewers.values()].filter(v=>v.name).map(v=>({name:v.name}))];
+    renderAud(list);broadcast({t:'users',list});
+  },1000);
+}
+function depth(id){let d=0,g=0;while(id&&id!=='host'&&g++<50){const v=viewers.get(id);if(!v)break;id=v.parent;d++}return d}
+function subtree(id){const s=new Set([id]);let g=true;while(g){g=false;viewers.forEach((v,k)=>{if(!s.has(k)&&s.has(v.parent)){s.add(k);g=true}})}return s}
+function kids(id){let n=0;viewers.forEach(v=>{if(v.parent===id)n++});return n}
+function pickParent(ex){
+  if(kids('host')<MAX_DIRECT)return 'host';
+  let best=null,bs=1e9;
+  viewers.forEach((v,k)=>{
+    if(ex.has(k)||!v.name||!v.parent||!v.conn.open)return;
+    const n=kids(k);if(n>=RELAY_KIDS)return;
+    const s=depth(k)*10+n;if(s<bs){bs=s;best=k}
+  });
+  return best||'host';
+}
+function attach(id){
+  const v=viewers.get(id);if(!v)return;
+  const p=pickParent(subtree(id));v.parent=p;
+  if(p==='host'){
+    const call=peer.call(id,stream,{sdpTransform:s=>boostSdp(s,Q().b)});
+    v.call=call;preferCodec(call);capBitrate(call,Q().b);
+  }else viewers.get(p).conn.send({t:'adopt',id,b:Math.min(Q().b,RELAY_BITRATE)});
+}
 function goLive(code,tries){
   peer=new Peer(PREFIX+code);
   peer.on('error',e=>{if(e.type==='unavailable-id'&&tries<4){peer.destroy();goLive(Math.random().toString(36).slice(2,8),tries+1)}else addMsg('','Connection problem: '+e.type,true)});
@@ -364,29 +402,53 @@ function goLive(code,tries){
   peer.on('connection',c=>{
     c.on('open',()=>{
       if(viewers.size>=MAX_VIEWERS){c.send({t:'full'});setTimeout(()=>c.close(),300);return}
-      viewers.set(c.peer,{conn:c,name:''});
+      viewers.set(c.peer,{conn:c,name:'',parent:null,call:null});
     });
     c.on('data',d=>{
       const v=viewers.get(c.peer);if(!v)return;
       if(d.t==='join'){
         v.name=String(d.name||'Viewer').slice(0,20);
-        const call=peer.call(c.peer,stream,{sdpTransform:boostSdp});preferCodec(call);capBitrate(call);
+        attach(c.peer);
         broadcast({t:'chat',sys:true,text:v.name+' joined'});addMsg('',v.name+' joined',true);pushAudience();
       }else if(d.t==='chat'){
         const text=String(d.text||'').slice(0,300);if(!text)return;
         addMsg(v.name,text);broadcast({t:'chat',name:v.name,text});
+      }else if(d.t==='orphan'){
+        try{v.call&&v.call.close()}catch(e){}
+        v.call=null;v.parent=null;attach(c.peer);
       }
     });
-    c.on('close',()=>{const v=viewers.get(c.peer);viewers.delete(c.peer);if(v&&v.name){broadcast({t:'chat',sys:true,text:v.name+' left'});addMsg('',v.name+' left',true)}pushAudience()});
+    c.on('close',()=>{
+      const v=viewers.get(c.peer);
+      try{v&&v.call&&v.call.close()}catch(e){}
+      viewers.delete(c.peer);
+      if(v&&v.name){broadcast({t:'chat',sys:true,text:v.name+' left'});addMsg('',v.name+' left',true)}
+      pushAudience();
+    });
   });
 }
 
-/* ---------- Viewer ---------- */
+/* ---------- Viewer (also a relay for up to RELAY_KIDS others) ---------- */
+let curCall=null,relayStream=null,kidCalls=new Map(),pendingKids=[],watchTimer=0,gotStream=false,ended=false;
+function armWatch(){gotStream=false;clearTimeout(watchTimer);watchTimer=setTimeout(()=>{if(!gotStream)orphan()},15000)}
+function orphan(){
+  if(ended)return;
+  curCall=null;
+  if(window._conn&&window._conn.open)window._conn.send({t:'orphan'});
+  armWatch();
+}
+function callKid(k){
+  const call=peer.call(k.id,relayStream);
+  kidCalls.set(k.id,call);
+  call.on('close',()=>kidCalls.delete(k.id));
+  capBitrate(call,k.b);
+}
 function onData(d){
   if(d.t==='chat')addMsg(d.name,d.text,d.sys);
   else if(d.t==='users')renderAud(d.list);
-  else if(d.t==='end'){$('vmsg').hidden=false;$('vmsg').textContent='The host ended the stream.';setBadge('Ended',false)}
-  else if(d.t==='full'){$('vmsg').textContent='This stage is full right now (max '+MAX_VIEWERS+' viewers).';setBadge('Full',false)}
+  else if(d.t==='adopt'){if(relayStream)callKid(d);else pendingKids.push(d)}
+  else if(d.t==='end'){ended=true;$('vmsg').hidden=false;$('vmsg').textContent='The host ended the stream.';setBadge('Ended',false)}
+  else if(d.t==='full'){ended=true;$('vmsg').textContent='This stage is full right now (max '+MAX_VIEWERS+' viewers).';setBadge('Full',false)}
 }
 function showUnmute(){
   const m=$('vmsg');m.hidden=false;m.textContent='';
@@ -400,10 +462,27 @@ function watch(code,name){
   peer.on('error',e=>{$('vmsg').textContent=e.type==='peer-unavailable'?'This stream is not live. Check the room code.':'Connection problem: '+e.type;setBadge('Offline',false)});
   peer.on('call',call=>{
     call.answer();
+    const old=curCall;curCall=call;
+    if(old)setTimeout(()=>{try{old.close()}catch(e){}},500);
+    call.on('close',()=>{if(curCall===call)orphan()});
+    try{call.peerConnection.addEventListener('iceconnectionstatechange',()=>{
+      if(call.peerConnection.iceConnectionState==='failed'&&curCall===call)orphan();
+    })}catch(e){}
     call.on('stream',s=>{
+      gotStream=true;
       const v=$('vid');
       if(v.srcObject===s)return;           /* the event can fire once per track */
       v.srcObject=s;
+      /* relay: hand a replacement stream to anyone I'm feeding */
+      if(relayStream&&relayStream!==s){
+        kidCalls.forEach(c=>c.peerConnection.getSenders().forEach(sn=>{
+          if(!sn.track)return;
+          const t=s.getTracks().find(x=>x.kind===sn.track.kind);
+          if(t)sn.replaceTrack(t).catch(()=>{});
+        }));
+      }
+      relayStream=s;
+      pendingKids.splice(0).forEach(callKid);
       v.volume=+$('vol').value||1;
       v.muted=false;
       setBadge('Live',true);$('muteBtn').hidden=false;$('vol').hidden=false;
@@ -421,9 +500,9 @@ function watch(code,name){
   });
   peer.on('open',()=>{
     const c=peer.connect(PREFIX+code,{reliable:true});
-    c.on('open',()=>{c.send({t:'join',name});window._conn=c});
+    c.on('open',()=>{c.send({t:'join',name});window._conn=c;armWatch()});
     c.on('data',onData);
-    c.on('close',()=>{$('vmsg').hidden=false;$('vmsg').textContent='The stream has ended.';setBadge('Ended',false)});
+    c.on('close',()=>{ended=true;clearTimeout(watchTimer);$('vmsg').hidden=false;$('vmsg').textContent='The stream has ended.';setBadge('Ended',false)});
   });
 }
 function sendChat(){
