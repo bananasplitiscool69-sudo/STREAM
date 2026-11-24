@@ -79,7 +79,8 @@ video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
   <video id="hostPrev" muted autoplay playsinline></video>
   <div class="meter" aria-hidden="true"><i id="meterBar"></i></div>
   <div class="astat" id="astat"></div>
-  <div class="row" style="margin-top:12px"><button id="screenBtn" class="alt">Share screen / tab instead</button><button id="liveBtn">Go live</button></div>
+  <button id="retryBtn" class="alt" style="width:100%;margin-top:10px">Allow microphone / refresh devices</button>
+  <div class="row" style="margin-top:10px"><button id="screenBtn" class="alt">Share screen / tab instead</button><button id="liveBtn">Go live</button></div>
   <div class="err" id="setupErr"></div>
 </div></div></div>
 
@@ -135,9 +136,22 @@ function startMeter(s){
 }
 
 /* ---------- Host ---------- */
+function permMsg(errs){
+  if(!errs.length)return '';
+  const hints={NotAllowedError:'blocked. Click the lock icon in the address bar, set it to Allow, then press the button below',NotFoundError:'no device found',NotReadableError:'in use by another app',SecurityError:'blocked by the page security settings'};
+  return errs.map(e=>e.what+' '+(hints[e.name]||e.name)).join('. ')+'.';
+}
 async function listDevices(){
-  try{const t=await navigator.mediaDevices.getUserMedia({video:true,audio:true});t.getTracks().forEach(x=>x.stop())}catch(e){
-    try{const t=await navigator.mediaDevices.getUserMedia({audio:true});t.getTracks().forEach(x=>x.stop())}catch(e2){}
+  const errs=[];
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
+    errs.push({what:'Microphone',name:'SecurityError'});
+    $('setupErr').textContent='This page cannot use the mic. It must be opened over https:// in its own tab (not a preview pane).';
+    return errs;
+  }
+  /* Ask separately so a missing camera can never stop the mic prompt. */
+  for(const [what,c] of [['Microphone',{audio:true}],['Camera',{video:true}]]){
+    try{const t=await navigator.mediaDevices.getUserMedia(c);t.getTracks().forEach(x=>x.stop())}
+    catch(e){errs.push({what,name:e.name})}
   }
   const d=await navigator.mediaDevices.enumerateDevices();
   const fill=(el,kind,none)=>{el.textContent='';d.filter(x=>x.kind===kind).forEach(x=>{const o=document.createElement('option');o.value=x.deviceId;o.textContent=x.label||kind;el.append(o)});if(none){const o=document.createElement('option');o.value='';o.textContent=none;el.append(o)}};
@@ -149,6 +163,7 @@ async function listDevices(){
   const cable=aopts.find(o=>/cable|blackhole|voicemeeter|obs|stereo mix|loopback|virtual/i.test(o.textContent));
   const pick=cable||aopts.find(o=>o.value!=='default'&&o.value!=='communications')||aopts[0];
   if(pick)$('asel').value=pick.value;
+  return errs;
 }
 async function preview(){
   $('setupErr').textContent='';
@@ -291,7 +306,15 @@ function sendChat(){
 }
 
 /* ---------- Wiring ---------- */
-$('hostBtn').onclick=async()=>{isHost=true;show('setup');await listDevices();preview()};
+async function setupHost(){
+  show('setup');
+  const errs=await listDevices();
+  await preview();
+  const m=permMsg(errs);
+  if(m)$('setupErr').textContent=m+(errs.length&&$('setupErr').textContent?' '+$('setupErr').textContent:'');
+}
+$('hostBtn').onclick=()=>{isHost=true;setupHost()};
+$('retryBtn').onclick=setupHost;
 $('vsel').onchange=$('asel').onchange=preview;
 $('screenBtn').onclick=shareScreen;
 $('liveBtn').onclick=()=>{
