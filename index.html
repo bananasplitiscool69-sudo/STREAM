@@ -23,7 +23,7 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
 input,select{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px 12px;width:100%}
 .screen{display:none;height:100%}
 .screen.on{display:block}
-.center{display:grid;place-items:center;height:100%;padding:20px}
+.center{display:grid;place-items:center;height:100%;padding:20px;overflow:auto}
 .box{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:28px;width:min(440px,100%)}
 h1{font-size:34px;font-weight:800;margin:0 0 4px;letter-spacing:-1px}
 h2{font-size:18px;margin:20px 0 8px}
@@ -52,6 +52,10 @@ video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
 .send{display:flex;gap:8px;padding:12px;border-top:1px solid var(--line)}
 .err{color:#ff8a8c;min-height:20px;font-size:14px}
 #hostPrev{width:100%;aspect-ratio:16/9;border-radius:10px;background:#000;margin-top:8px}
+.meter{height:8px;background:var(--line);border-radius:4px;margin-top:8px;overflow:hidden}
+.meter i{display:block;height:100%;width:0;background:#3ba55d}
+.astat{font-size:13px;color:var(--dim);margin-top:6px;min-height:20px}
+.astat.bad{color:#ff8a8c}
 @media(max-width:800px){.stage{grid-template-columns:1fr;grid-template-rows:55% 45%}.side{border-left:0;border-top:1px solid var(--line)}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
@@ -69,11 +73,13 @@ video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
 
 <div id="setup" class="screen"><div class="center"><div class="box">
   <h1>Pick your source</h1>
-  <p>For OBS, start the Virtual Camera and choose it below.</p>
+  <p>The OBS Virtual Camera has no sound. Pick a mic or virtual audio cable below, or share a tab/screen with audio.</p>
   <label for="vsel">Video</label><select id="vsel"></select>
   <label for="asel">Audio</label><select id="asel"></select>
   <video id="hostPrev" muted autoplay playsinline></video>
-  <div class="row" style="margin-top:12px"><button id="screenBtn" class="alt">Share screen instead</button><button id="liveBtn">Go live</button></div>
+  <div class="meter" aria-hidden="true"><i id="meterBar"></i></div>
+  <div class="astat" id="astat"></div>
+  <div class="row" style="margin-top:12px"><button id="screenBtn" class="alt">Share screen / tab instead</button><button id="liveBtn">Go live</button></div>
   <div class="err" id="setupErr"></div>
 </div></div></div>
 
@@ -94,35 +100,111 @@ video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
 const $=id=>document.getElementById(id);
 const PREFIX='stagelive-',MAX_VIEWERS=8;
 let peer,stream,isHost=false,myName='Viewer',viewers=new Map();
+let meterCtx=null,meterRaf=0,mixCtx=null;
 
 function show(id){document.querySelectorAll('.screen').forEach(s=>s.classList.toggle('on',s.id===id))}
 function addMsg(name,text,sys){const d=document.createElement('div');if(sys){d.className='sys';d.textContent=text}else{const b=document.createElement('b');b.textContent=name+': ';d.append(b,document.createTextNode(text))}const c=$('chat');c.append(d);c.scrollTop=c.scrollHeight}
 function setBadge(t,live){$('badge').textContent=t;$('badge').classList.toggle('off',!live)}
 function renderAud(list){const a=$('aud');a.textContent='';list.forEach(u=>{const s=document.createElement('span');s.textContent=u.name;if(u.host)s.className='host';a.append(s)})}
 
+/* ---------- Audio level meter (host setup) ---------- */
+function stopMeter(){
+  cancelAnimationFrame(meterRaf);
+  if(meterCtx){meterCtx.close().catch(()=>{});meterCtx=null}
+  $('meterBar').style.width='0';
+}
+function startMeter(s){
+  stopMeter();
+  const at=s.getAudioTracks();
+  const st=$('astat');
+  if(!at.length){st.className='astat bad';st.textContent='No audio track. Viewers will hear nothing.';return}
+  st.className='astat';st.textContent='Audio: '+(at[0].label||'active')+' (the bar should move when there is sound)';
+  try{
+    meterCtx=new (window.AudioContext||window.webkitAudioContext)();
+    meterCtx.resume().catch(()=>{});
+    const an=meterCtx.createAnalyser();an.fftSize=512;
+    meterCtx.createMediaStreamSource(new MediaStream(at)).connect(an);
+    const buf=new Uint8Array(an.fftSize);
+    (function tick(){
+      an.getByteTimeDomainData(buf);
+      let m=0;for(let i=0;i<buf.length;i++)m=Math.max(m,Math.abs(buf[i]-128));
+      $('meterBar').style.width=Math.min(100,m/128*160)+'%';
+      meterRaf=requestAnimationFrame(tick);
+    })();
+  }catch(e){}
+}
+
 /* ---------- Host ---------- */
 async function listDevices(){
-  try{const t=await navigator.mediaDevices.getUserMedia({video:true,audio:true});t.getTracks().forEach(x=>x.stop())}catch(e){}
+  try{const t=await navigator.mediaDevices.getUserMedia({video:true,audio:true});t.getTracks().forEach(x=>x.stop())}catch(e){
+    try{const t=await navigator.mediaDevices.getUserMedia({audio:true});t.getTracks().forEach(x=>x.stop())}catch(e2){}
+  }
   const d=await navigator.mediaDevices.enumerateDevices();
-  const fill=(el,kind,none)=>{el.textContent='';if(none){const o=document.createElement('option');o.value='';o.textContent=none;el.append(o)}d.filter(x=>x.kind===kind).forEach(x=>{const o=document.createElement('option');o.value=x.deviceId;o.textContent=x.label||kind;el.append(o)})};
-  fill($('vsel'),'videoinput');fill($('asel'),'audioinput','No audio');
+  const fill=(el,kind,none)=>{el.textContent='';d.filter(x=>x.kind===kind).forEach(x=>{const o=document.createElement('option');o.value=x.deviceId;o.textContent=x.label||kind;el.append(o)});if(none){const o=document.createElement('option');o.value='';o.textContent=none;el.append(o)}};
+  fill($('vsel'),'videoinput');
+  fill($('asel'),'audioinput','No audio');
   const obs=[...$('vsel').options].find(o=>/obs/i.test(o.textContent));if(obs)$('vsel').value=obs.value;
+  /* Prefer a virtual cable / OBS audio device, otherwise the first real input. */
+  const aopts=[...$('asel').options].filter(o=>o.value);
+  const cable=aopts.find(o=>/cable|blackhole|voicemeeter|obs|stereo mix|loopback|virtual/i.test(o.textContent));
+  const pick=cable||aopts.find(o=>o.value!=='default'&&o.value!=='communications')||aopts[0];
+  if(pick)$('asel').value=pick.value;
 }
 async function preview(){
   $('setupErr').textContent='';
   try{
+    stopMeter();
     stream&&stream.getTracks().forEach(t=>t.stop());
     const v=$('vsel').value,a=$('asel').value;
-    stream=await navigator.mediaDevices.getUserMedia({video:v?{deviceId:{exact:v},width:{ideal:1280},height:{ideal:720},frameRate:{ideal:30}}:true,audio:a?{deviceId:{exact:a},echoCancellation:false,noiseSuppression:false}:false});
+    stream=await navigator.mediaDevices.getUserMedia({
+      video:v?{deviceId:{exact:v},width:{ideal:1280},height:{ideal:720},frameRate:{ideal:30}}:true,
+      audio:a?{deviceId:{exact:a},echoCancellation:false,noiseSuppression:false,autoGainControl:false,channelCount:2}:false
+    });
     $('hostPrev').srcObject=stream;
-  }catch(e){$('setupErr').textContent='Could not open that source: '+e.message}
+    startMeter(stream);
+  }catch(e){
+    $('setupErr').textContent='Could not open that source: '+e.message;
+    /* If audio was the problem, still try video alone so the page keeps working. */
+    try{
+      const v=$('vsel').value;
+      stream=await navigator.mediaDevices.getUserMedia({video:v?{deviceId:{exact:v}}:true,audio:false});
+      $('hostPrev').srcObject=stream;startMeter(stream);
+    }catch(e2){}
+  }
 }
 async function shareScreen(){
   $('setupErr').textContent='';
-  try{stream&&stream.getTracks().forEach(t=>t.stop());stream=await navigator.mediaDevices.getDisplayMedia({video:true,audio:true});$('hostPrev').srcObject=stream}
-  catch(e){$('setupErr').textContent='Screen share cancelled.'}
+  try{
+    stopMeter();
+    const disp=await navigator.mediaDevices.getDisplayMedia({video:true,audio:true});
+    let mic=null;
+    const a=$('asel').value;
+    if(a){try{mic=await navigator.mediaDevices.getUserMedia({audio:{deviceId:{exact:a},echoCancellation:true,noiseSuppression:true}})}catch(e){}}
+    stream&&stream.getTracks().forEach(t=>t.stop());
+    const srcs=[disp,mic].filter(s=>s&&s.getAudioTracks().length);
+    let audio=null;
+    if(srcs.length>1){
+      mixCtx&&mixCtx.close().catch(()=>{});
+      mixCtx=new (window.AudioContext||window.webkitAudioContext)();
+      const dest=mixCtx.createMediaStreamDestination();
+      srcs.forEach(s=>mixCtx.createMediaStreamSource(new MediaStream(s.getAudioTracks())).connect(dest));
+      audio=dest.stream.getAudioTracks()[0];
+    }else if(srcs.length){audio=srcs[0].getAudioTracks()[0]}
+    stream=new MediaStream([...disp.getVideoTracks(),...(audio?[audio]:[])]);
+    $('hostPrev').srcObject=stream;
+    startMeter(stream);
+    if(!disp.getAudioTracks().length&&!mic)$('setupErr').textContent='No tab/system audio was shared. Tick "Share audio" in the browser prompt, or pick a mic.';
+  }catch(e){$('setupErr').textContent='Screen share cancelled.'}
 }
-function capBitrate(call){setTimeout(()=>{try{call.peerConnection.getSenders().forEach(s=>{if(s.track&&s.track.kind==='video'){const p=s.getParameters();p.encodings=p.encodings&&p.encodings.length?p.encodings:[{}];p.encodings[0].maxBitrate=2500000;s.setParameters(p).catch(()=>{})}})}catch(e){}},1500)}
+function capBitrate(call){
+  setTimeout(()=>{try{call.peerConnection.getSenders().forEach(s=>{
+    if(!s.track)return;
+    const p=s.getParameters();p.encodings=p.encodings&&p.encodings.length?p.encodings:[{}];
+    if(s.track.kind==='video')p.encodings[0].maxBitrate=2500000;
+    else p.encodings[0].maxBitrate=128000;
+    s.setParameters(p).catch(()=>{});
+  })}catch(e){}},1500);
+}
 function broadcast(m){viewers.forEach(v=>v.conn.open&&v.conn.send(m))}
 function pushAudience(){const list=[{name:'Host',host:true},...[...viewers.values()].filter(v=>v.name).map(v=>({name:v.name}))];renderAud(list);broadcast({t:'users',list})}
 function goLive(code,tries){
@@ -133,7 +215,9 @@ function goLive(code,tries){
     $('title').textContent='Room '+code;$('link').value=url;$('shareRow').hidden=false;
     setBadge('Live',true);$('vmsg').hidden=true;$('endBtn').textContent='End stream';$('endBtn').className='end';
     $('vid').srcObject=stream;$('vid').muted=true;
-    renderAud([{name:'Host',host:true}]);addMsg('','You are live. Share the link above.',true);
+    renderAud([{name:'Host',host:true}]);
+    addMsg('','You are live. Share the link above.',true);
+    addMsg('',stream.getAudioTracks().length?'Audio is being sent. Your own preview is muted to avoid echo.':'Warning: no audio track, viewers will hear nothing.',true);
   });
   peer.on('connection',c=>{
     c.on('open',()=>{
@@ -162,6 +246,11 @@ function onData(d){
   else if(d.t==='end'){$('vmsg').hidden=false;$('vmsg').textContent='The host ended the stream.';setBadge('Ended',false)}
   else if(d.t==='full'){$('vmsg').textContent='This stage is full right now (max '+MAX_VIEWERS+' viewers).';setBadge('Full',false)}
 }
+function showUnmute(){
+  const m=$('vmsg');m.hidden=false;m.textContent='';
+  const b=document.createElement('button');b.textContent='Click to hear the stream';
+  b.onclick=()=>setMute(false);m.append(b);
+}
 function watch(code,name){
   show('room');$('title').textContent='Room '+code;
   $('vmsg').textContent='Joining…';setBadge('Connecting',false);
@@ -170,15 +259,22 @@ function watch(code,name){
   peer.on('call',call=>{
     call.answer();
     call.on('stream',s=>{
-      const v=$('vid');v.srcObject=s;v.muted=false;v.volume=+$('vol').value||1;
+      const v=$('vid');
+      if(v.srcObject===s)return;           /* the event can fire once per track */
+      v.srcObject=s;
+      v.volume=+$('vol').value||1;
+      v.muted=false;
       setBadge('Live',true);$('muteBtn').hidden=false;$('vol').hidden=false;
-      v.play().then(()=>{$('vmsg').hidden=true;$('muteBtn').textContent='Mute'}).catch(()=>{
-        v.muted=true;v.play().catch(()=>{});$('muteBtn').textContent='Unmute';
-        $('vmsg').hidden=false;$('vmsg').textContent='';
-        const b=document.createElement('button');b.textContent='Click to unmute';
-        b.onclick=()=>setMute(false);$('vmsg').append(b);
+      const hasAudio=s.getAudioTracks().length>0;
+      if(!hasAudio)addMsg('','The host is not sending audio.',true);
+      v.play().then(()=>{
+        $('vmsg').hidden=true;$('muteBtn').textContent='Mute';
+      }).catch(()=>{
+        /* Browser blocked autoplay with sound: start muted, ask for one click. */
+        v.muted=true;v.play().catch(()=>{});
+        $('muteBtn').textContent='Unmute';
+        if(hasAudio)showUnmute();else $('vmsg').hidden=true;
       });
-      if(!s.getAudioTracks().length)addMsg('','The host is not sending audio.',true);
     });
   });
   peer.on('open',()=>{
@@ -198,7 +294,12 @@ function sendChat(){
 $('hostBtn').onclick=async()=>{isHost=true;show('setup');await listDevices();preview()};
 $('vsel').onchange=$('asel').onchange=preview;
 $('screenBtn').onclick=shareScreen;
-$('liveBtn').onclick=()=>{if(!stream){$('setupErr').textContent='Pick a source first.';return}show('room');goLive(Math.random().toString(36).slice(2,8),0)};
+$('liveBtn').onclick=()=>{
+  if(!stream){$('setupErr').textContent='Pick a source first.';return}
+  if(!stream.getAudioTracks().length&&!confirm('There is no audio in this stream, so viewers will hear nothing. Go live anyway?'))return;
+  stopMeter();
+  show('room');goLive(Math.random().toString(36).slice(2,8),0);
+};
 $('watchBtn').onclick=()=>{const c=$('code').value.trim().toLowerCase();if(!c)return;const n=prompt('Your name for chat?','Viewer')||'Viewer';myName=n.slice(0,20);watch(c,myName)};
 $('code').onkeydown=e=>{if(e.key==='Enter')$('watchBtn').click()};
 function setMute(m){
