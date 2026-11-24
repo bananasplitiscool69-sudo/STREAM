@@ -77,7 +77,7 @@ video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
   <label for="vsel">Video</label><select id="vsel"></select>
   <label for="asel">Audio</label><select id="asel"></select>
   <label for="qsel">Quality</label>
-  <select id="qsel"><option value="720p30">720p 30fps (light on upload)</option><option value="1080p30" selected>1080p 30fps (recommended)</option><option value="1080p60">1080p 60fps (needs fast upload)</option></select>
+  <select id="qsel"><option value="720p30">720p 30fps (light on upload)</option><option value="1080p30" selected>1080p 30fps (recommended)</option><option value="1080p60">1080p 60fps (needs fast upload)</option><option value="1440p30">1440p 30fps (needs very fast upload)</option></select>
   <video id="hostPrev" muted autoplay playsinline></video>
   <div class="meter" aria-hidden="true"><i id="meterBar"></i></div>
   <div class="astat" id="astat"></div>
@@ -88,7 +88,7 @@ video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
 
 <div id="room" class="screen"><div class="stage">
   <div class="main">
-    <div class="top"><b id="title">Stage</b><span class="badge off" id="badge">Connecting</span><span class="sp"></span><input id="vol" type="range" min="0" max="1" step="0.05" value="1" aria-label="Volume" hidden><button id="endBtn" class="alt">Leave</button><button id="muteBtn" class="alt" hidden>Mute</button></div>
+    <div class="top"><b id="title">Stage</b><span class="badge off" id="badge">Connecting</span><span class="sp"></span><input id="vol" type="range" min="0" max="1" step="0.05" value="1" aria-label="Volume" hidden><button id="fsBtn" class="alt">Fullscreen</button><button id="endBtn" class="alt">Leave</button><button id="muteBtn" class="alt" hidden>Mute</button></div>
     <div class="vwrap"><video id="vid" autoplay playsinline muted></video><div class="msg" id="vmsg"></div></div>
     <div class="share" id="shareRow" hidden><input id="link" readonly aria-label="Watch link"><button id="copyBtn">Copy link</button></div>
   </div>
@@ -105,7 +105,7 @@ const PREFIX='stagelive-',MAX_VIEWERS=8;
 let peer,stream,isHost=false,myName='Viewer',viewers=new Map();
 let meterCtx=null,meterRaf=0,mixCtx=null;
 
-const QUALITY={'720p30':{w:1280,h:720,f:30,b:3500000},'1080p30':{w:1920,h:1080,f:30,b:6000000},'1080p60':{w:1920,h:1080,f:60,b:9000000}};
+const QUALITY={'720p30':{w:1280,h:720,f:30,b:4000000},'1080p30':{w:1920,h:1080,f:30,b:8000000},'1080p60':{w:1920,h:1080,f:60,b:12000000},'1440p30':{w:2560,h:1440,f:30,b:14000000}};
 const Q=()=>QUALITY[$('qsel').value]||QUALITY['1080p30'];
 function show(id){document.querySelectorAll('.screen').forEach(s=>s.classList.toggle('on',s.id===id))}
 function addMsg(name,text,sys){const d=document.createElement('div');if(sys){d.className='sys';d.textContent=text}else{const b=document.createElement('b');b.textContent=name+': ';d.append(b,document.createTextNode(text))}const c=$('chat');c.append(d);c.scrollTop=c.scrollHeight}
@@ -224,6 +224,20 @@ function capBitrate(call){
     s.setParameters(p).catch(()=>{});
   })}catch(e){}},1500);
 }
+/* Ask Chrome to start near the target bitrate instead of ramping up slowly. */
+function boostSdp(sdp){
+  const k=Math.round(Q().b/1000);
+  return sdp.replace(/a=fmtp:\d+ [^\r\n]*/g,m=>/apt=|useinbandfec/.test(m)?m:m+';x-google-min-bitrate='+Math.round(k/2)+';x-google-start-bitrate='+Math.round(k*0.8)+';x-google-max-bitrate='+k);
+}
+/* VP9 looks better per bit; for 60fps use H264 (usually hardware encoded). */
+function preferCodec(call){
+  try{
+    const caps=RTCRtpSender.getCapabilities('video');if(!caps)return;
+    const first=Q().f>30?'video/H264':'video/VP9';
+    const sorted=[...caps.codecs].sort((a,b)=>(b.mimeType===first)-(a.mimeType===first));
+    call.peerConnection.getTransceivers().forEach(t=>{if(t.sender&&t.sender.track&&t.sender.track.kind==='video')t.setCodecPreferences(sorted)});
+  }catch(e){}
+}
 function broadcast(m){viewers.forEach(v=>v.conn.open&&v.conn.send(m))}
 function pushAudience(){const list=[{name:'Host',host:true},...[...viewers.values()].filter(v=>v.name).map(v=>({name:v.name}))];renderAud(list);broadcast({t:'users',list})}
 function goLive(code,tries){
@@ -247,7 +261,7 @@ function goLive(code,tries){
       const v=viewers.get(c.peer);if(!v)return;
       if(d.t==='join'){
         v.name=String(d.name||'Viewer').slice(0,20);
-        const call=peer.call(c.peer,stream);capBitrate(call);
+        const call=peer.call(c.peer,stream,{sdpTransform:boostSdp});preferCodec(call);capBitrate(call);
         broadcast({t:'chat',sys:true,text:v.name+' joined'});addMsg('',v.name+' joined',true);pushAudience();
       }else if(d.t==='chat'){
         const text=String(d.text||'').slice(0,300);if(!text)return;
@@ -345,6 +359,7 @@ function endStream(){
   }
   setTimeout(()=>{try{peer&&peer.destroy()}catch(e){}location.href=location.pathname},isHost?300:0);
 }
+$('fsBtn').onclick=()=>{const w=document.querySelector('.vwrap');(document.fullscreenElement?document.exitFullscreen():w.requestFullscreen()).catch(()=>{})};
 $('endBtn').onclick=endStream;
 $('sendBtn').onclick=sendChat;
 $('chatIn').onkeydown=e=>{if(e.key==='Enter')sendChat()};
