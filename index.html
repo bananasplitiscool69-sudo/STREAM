@@ -14,6 +14,11 @@ body{background:var(--bg);color:var(--text);font:15px/1.5 Sora,system-ui,sans-se
 button,input,select{font:inherit;color:inherit}
 button{background:var(--accent);border:0;border-radius:8px;padding:10px 16px;cursor:pointer;font-weight:600}
 button.alt{background:var(--line)}
+[hidden]{display:none!important}
+.top .sp{flex:1}
+.top button{padding:6px 12px;font-size:13px}
+.top input[type=range]{width:90px;padding:0}
+button.end{background:var(--live)}
 button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #fff;outline-offset:2px}
 input,select{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px 12px;width:100%}
 .screen{display:none;height:100%}
@@ -74,7 +79,7 @@ video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
 
 <div id="room" class="screen"><div class="stage">
   <div class="main">
-    <div class="top"><b id="title">Stage</b><span class="badge off" id="badge">Connecting</span></div>
+    <div class="top"><b id="title">Stage</b><span class="badge off" id="badge">Connecting</span><span class="sp"></span><input id="vol" type="range" min="0" max="1" step="0.05" value="1" aria-label="Volume" hidden><button id="endBtn" class="alt">Leave</button><button id="muteBtn" class="alt" hidden>Mute</button></div>
     <div class="vwrap"><video id="vid" autoplay playsinline muted></video><div class="msg" id="vmsg"></div></div>
     <div class="share" id="shareRow" hidden><input id="link" readonly aria-label="Watch link"><button id="copyBtn">Copy link</button></div>
   </div>
@@ -126,7 +131,7 @@ function goLive(code,tries){
   peer.on('open',()=>{
     const url=location.origin+location.pathname+'?room='+code;
     $('title').textContent='Room '+code;$('link').value=url;$('shareRow').hidden=false;
-    setBadge('Live',true);$('vmsg').hidden=true;
+    setBadge('Live',true);$('vmsg').hidden=true;$('endBtn').textContent='End stream';$('endBtn').className='end';
     $('vid').srcObject=stream;$('vid').muted=true;
     renderAud([{name:'Host',host:true}]);addMsg('','You are live. Share the link above.',true);
   });
@@ -154,6 +159,7 @@ function goLive(code,tries){
 function onData(d){
   if(d.t==='chat')addMsg(d.name,d.text,d.sys);
   else if(d.t==='users')renderAud(d.list);
+  else if(d.t==='end'){$('vmsg').hidden=false;$('vmsg').textContent='The host ended the stream.';setBadge('Ended',false)}
   else if(d.t==='full'){$('vmsg').textContent='This stage is full right now (max '+MAX_VIEWERS+' viewers).';setBadge('Full',false)}
 }
 function watch(code,name){
@@ -164,11 +170,15 @@ function watch(code,name){
   peer.on('call',call=>{
     call.answer();
     call.on('stream',s=>{
-      $('vid').srcObject=s;$('vid').play().catch(()=>{});
-      $('vmsg').hidden=false;$('vmsg').textContent='';
-      const b=document.createElement('button');b.textContent='Unmute';
-      b.onclick=()=>{$('vid').muted=false;$('vmsg').hidden=true};
-      $('vmsg').append(b);setBadge('Live',true);
+      const v=$('vid');v.srcObject=s;v.muted=false;v.volume=+$('vol').value||1;
+      setBadge('Live',true);$('muteBtn').hidden=false;$('vol').hidden=false;
+      v.play().then(()=>{$('vmsg').hidden=true;$('muteBtn').textContent='Mute'}).catch(()=>{
+        v.muted=true;v.play().catch(()=>{});$('muteBtn').textContent='Unmute';
+        $('vmsg').hidden=false;$('vmsg').textContent='';
+        const b=document.createElement('button');b.textContent='Click to unmute';
+        b.onclick=()=>setMute(false);$('vmsg').append(b);
+      });
+      if(!s.getAudioTracks().length)addMsg('','The host is not sending audio.',true);
     });
   });
   peer.on('open',()=>{
@@ -191,11 +201,27 @@ $('screenBtn').onclick=shareScreen;
 $('liveBtn').onclick=()=>{if(!stream){$('setupErr').textContent='Pick a source first.';return}show('room');goLive(Math.random().toString(36).slice(2,8),0)};
 $('watchBtn').onclick=()=>{const c=$('code').value.trim().toLowerCase();if(!c)return;const n=prompt('Your name for chat?','Viewer')||'Viewer';myName=n.slice(0,20);watch(c,myName)};
 $('code').onkeydown=e=>{if(e.key==='Enter')$('watchBtn').click()};
+function setMute(m){
+  const v=$('vid');v.muted=m;
+  if(!m){v.volume=+$('vol').value||1;v.play().catch(()=>{});$('vmsg').hidden=true}
+  $('muteBtn').textContent=m?'Unmute':'Mute';
+}
+$('muteBtn').onclick=()=>setMute(!$('vid').muted);
+$('vol').oninput=()=>{$('vid').volume=+$('vol').value};
+function endStream(){
+  if(isHost){
+    if(!confirm('End the stream for everyone?'))return;
+    broadcast({t:'end'});
+    stream&&stream.getTracks().forEach(t=>t.stop());
+  }
+  setTimeout(()=>{try{peer&&peer.destroy()}catch(e){}location.href=location.pathname},isHost?300:0);
+}
+$('endBtn').onclick=endStream;
 $('sendBtn').onclick=sendChat;
 $('chatIn').onkeydown=e=>{if(e.key==='Enter')sendChat()};
 $('copyBtn').onclick=()=>{navigator.clipboard.writeText($('link').value).then(()=>{$('copyBtn').textContent='Copied'})};
 const room=new URLSearchParams(location.search).get('room');
-if(room){const n=prompt('Your name for chat?','Viewer')||'Viewer';watch(room.toLowerCase(),n.slice(0,20))}
+if(room){$('code').value=room;$('watchBtn').focus()}
 </script>
 </body>
 </html>
