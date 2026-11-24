@@ -76,6 +76,7 @@ video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
   <p>The OBS Virtual Camera has no sound. Pick a mic or virtual audio cable below, or share a tab/screen with audio.</p>
   <label for="vsel">Video</label><select id="vsel"></select>
   <label for="asel">Audio</label><select id="asel"></select>
+  <label for="gain">Mic volume <span id="gainVal">200%</span></label><input id="gain" type="range" min="0" max="5" step="0.1" value="2">
   <label for="qsel">Quality</label>
   <select id="qsel"><option value="720p30">720p 30fps (light on upload)</option><option value="1080p30" selected>1080p 30fps (recommended)</option><option value="1080p60">1080p 60fps (needs fast upload)</option><option value="1440p30">1440p 30fps (needs very fast upload)</option></select>
   <video id="hostPrev" muted autoplay playsinline></video>
@@ -140,6 +141,31 @@ function startMeter(s){
 }
 
 /* ---------- Host ---------- */
+/* ---------- Mic volume boost (gain + limiter so it never distorts) ---------- */
+let gainCtx=null,gainNode=null,rawAudio=null;
+function boostAudio(s){
+  const at=s.getAudioTracks();
+  if(!at.length)return s;
+  try{
+    gainCtx=new (window.AudioContext||window.webkitAudioContext)();
+    gainCtx.resume().catch(()=>{});
+    rawAudio=new MediaStream(at);
+    const src=gainCtx.createMediaStreamSource(rawAudio);
+    gainNode=gainCtx.createGain();
+    gainNode.gain.value=+$('gain').value;
+    const lim=gainCtx.createDynamicsCompressor();
+    lim.threshold.value=-3;lim.knee.value=0;lim.ratio.value=20;lim.attack.value=0.003;lim.release.value=0.1;
+    const dest=gainCtx.createMediaStreamDestination();
+    src.connect(gainNode);gainNode.connect(lim);lim.connect(dest);
+    return new MediaStream([...s.getVideoTracks(),dest.stream.getAudioTracks()[0]]);
+  }catch(e){return s}
+}
+function stopStream(){
+  stream&&stream.getTracks().forEach(t=>t.stop());
+  rawAudio&&rawAudio.getTracks().forEach(t=>t.stop());
+  rawAudio=null;gainNode=null;
+  if(gainCtx){gainCtx.close().catch(()=>{});gainCtx=null}
+}
 function permMsg(errs){
   if(!errs.length)return '';
   const hints={NotAllowedError:'blocked. Click the lock icon in the address bar, set it to Allow, then press the button below',NotFoundError:'no device found',NotReadableError:'in use by another app',SecurityError:'blocked by the page security settings'};
@@ -173,12 +199,13 @@ async function preview(){
   $('setupErr').textContent='';
   try{
     stopMeter();
-    stream&&stream.getTracks().forEach(t=>t.stop());
+    stopStream();
     const v=$('vsel').value,a=$('asel').value;
     stream=await navigator.mediaDevices.getUserMedia({
       video:v?{deviceId:{exact:v},width:{ideal:Q().w},height:{ideal:Q().h},frameRate:{ideal:Q().f}}:true,
       audio:a?{deviceId:{exact:a},echoCancellation:false,noiseSuppression:false,autoGainControl:false,channelCount:2}:false
     });
+    stream=boostAudio(stream);
     $('hostPrev').srcObject=stream;
     startMeter(stream);
   }catch(e){
@@ -199,7 +226,7 @@ async function shareScreen(){
     let mic=null;
     const a=$('asel').value;
     if(a){try{mic=await navigator.mediaDevices.getUserMedia({audio:{deviceId:{exact:a},echoCancellation:true,noiseSuppression:true}})}catch(e){}}
-    stream&&stream.getTracks().forEach(t=>t.stop());
+    stopStream();
     const srcs=[disp,mic].filter(s=>s&&s.getAudioTracks().length);
     let audio=null;
     if(srcs.length>1){
@@ -210,6 +237,7 @@ async function shareScreen(){
       audio=dest.stream.getAudioTracks()[0];
     }else if(srcs.length){audio=srcs[0].getAudioTracks()[0]}
     stream=new MediaStream([...disp.getVideoTracks(),...(audio?[audio]:[])]);
+    stream=boostAudio(stream);
     $('hostPrev').srcObject=stream;
     startMeter(stream);
     if(!disp.getAudioTracks().length&&!mic)$('setupErr').textContent='No tab/system audio was shared. Tick "Share audio" in the browser prompt, or pick a mic.';
@@ -333,6 +361,11 @@ async function setupHost(){
 }
 $('hostBtn').onclick=()=>{isHost=true;setupHost()};
 $('retryBtn').onclick=setupHost;
+$('gain').oninput=()=>{
+  const g=+$('gain').value;
+  $('gainVal').textContent=Math.round(g*100)+'%';
+  if(gainNode)gainNode.gain.value=g;
+};
 $('vsel').onchange=$('asel').onchange=$('qsel').onchange=preview;
 $('screenBtn').onclick=shareScreen;
 $('liveBtn').onclick=()=>{
@@ -355,7 +388,7 @@ function endStream(){
   if(isHost){
     if(!confirm('End the stream for everyone?'))return;
     broadcast({t:'end'});
-    stream&&stream.getTracks().forEach(t=>t.stop());
+    stopStream();
   }
   setTimeout(()=>{try{peer&&peer.destroy()}catch(e){}location.href=location.pathname},isHost?300:0);
 }
