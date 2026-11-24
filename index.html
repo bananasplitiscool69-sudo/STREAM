@@ -6,6 +6,7 @@
 <title>Stage Live</title>
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;800&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
 <style>
 :root{--bg:#14121f;--panel:#1d1a2e;--line:#2e2a47;--text:#ebe9f7;--dim:#9a96b8;--accent:#5865f2;--live:#ed4245;color-scheme:dark}
 *{box-sizing:border-box}
@@ -56,6 +57,17 @@ video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
 .meter i{display:block;height:100%;width:0;background:#3ba55d}
 .astat{font-size:13px;color:var(--dim);margin-top:6px;min-height:20px}
 .astat.bad{color:#ff8a8c}
+#home .box{width:min(560px,100%)}
+.browse{display:flex;flex-direction:column;gap:8px;margin-bottom:6px}
+.scard{display:flex;align-items:center;gap:12px;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.scard .dot{width:10px;height:10px;border-radius:50%;background:var(--live);flex:none}
+.scard .info{flex:1;min-width:0}
+.scard .t{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.scard .s{font-size:12px;color:var(--dim)}
+.scard button{padding:6px 14px;font-size:13px}
+.empty{color:var(--dim);font-size:14px;margin:0}
+.chk{display:flex;align-items:center;gap:8px;color:var(--text);font-size:14px}
+.chk input{width:auto;padding:0}
 @media(max-width:800px){.stage{grid-template-columns:1fr;grid-template-rows:55% 45%}.side{border-left:0;border-top:1px solid var(--line)}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
@@ -67,6 +79,8 @@ video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
   <p>Stream from OBS. Everyone watches in the browser.</p>
   <label for="code">Watch a stream</label>
   <div class="row"><input id="code" placeholder="Room code" autocomplete="off"><button id="watchBtn">Watch</button></div>
+  <h2>Live now</h2>
+  <div id="browse" class="browse"></div>
   <h2>Stream yourself</h2>
   <button id="hostBtn" class="alt" style="width:100%">Set up my stream</button>
 </div></div></div>
@@ -74,6 +88,9 @@ video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
 <div id="setup" class="screen"><div class="center"><div class="box">
   <h1>Pick your source</h1>
   <p>The OBS Virtual Camera has no sound. Pick a mic or virtual audio cable below, or share a tab/screen with audio.</p>
+  <label for="stitle">Stream title</label><input id="stitle" maxlength="40" placeholder="e.g. Friday night football" autocomplete="off">
+  <label for="hname">Your name</label><input id="hname" maxlength="20" placeholder="Host" autocomplete="off">
+  <label class="chk" style="margin-top:12px"><input type="checkbox" id="listed" checked> Show in the Live now list</label>
   <label for="vsel">Video</label><select id="vsel"></select>
   <label for="asel">Audio</label><select id="asel"></select>
   <label for="gain">Mic volume <span id="gainVal">200%</span></label><input id="gain" type="range" min="0" max="5" step="0.1" value="2">
@@ -105,6 +122,69 @@ const $=id=>document.getElementById(id);
 const PREFIX='stagelive-',MAX_VIEWERS=8;
 let peer,stream,isHost=false,myName='Viewer',viewers=new Map();
 let meterCtx=null,meterRaf=0,mixCtx=null;
+
+/* ---------- Browse: live stream directory over a public MQTT broker ---------- */
+const BROKER='wss://broker.emqx.io:8084/mqtt';
+const TOPIC='stagelive-9f3k/v1/streams/';
+const STALE=180000;
+let browseMq=null,hostMq=null,pubTimer=0,publishNow=null,myCode='',streams=new Map(),mqOk=false;
+function renderBrowse(){
+  const box=$('browse');if(!box)return;
+  box.textContent='';
+  const now=Date.now();
+  const list=[...streams.values()].filter(x=>now-x.ts<STALE).sort((a,b)=>b.viewers-a.viewers);
+  if(!list.length){
+    const p=document.createElement('p');p.className='empty';
+    p.textContent=mqOk?'No streams are live right now.':'Looking for live streams…';
+    box.append(p);return;
+  }
+  list.forEach(x=>{
+    const c=document.createElement('div');c.className='scard';
+    const d=document.createElement('span');d.className='dot';
+    const info=document.createElement('div');info.className='info';
+    const t=document.createElement('div');t.className='t';t.textContent=x.title||'Untitled stream';
+    const sub=document.createElement('div');sub.className='s';sub.textContent=(x.host||'Host')+' · '+x.viewers+'/'+x.max+' watching';
+    info.append(t,sub);
+    const b=document.createElement('button');
+    const full=x.viewers>=x.max;
+    b.textContent=full?'Full':'Watch';b.disabled=full;
+    b.onclick=()=>{const n=prompt('Your name for chat?','Viewer')||'Viewer';myName=n.slice(0,20);watch(x.code,myName)};
+    c.append(d,info,b);box.append(c);
+  });
+}
+function startBrowse(){
+  if(typeof mqtt==='undefined'){$('browse').textContent='';const p=document.createElement('p');p.className='empty';p.textContent='The stream list could not load. You can still use a room code.';$('browse').append(p);return}
+  browseMq=mqtt.connect(BROKER,{clientId:'sl-b-'+Math.random().toString(16).slice(2,10),reconnectPeriod:3000});
+  browseMq.on('connect',()=>{mqOk=true;browseMq.subscribe(TOPIC+'+');renderBrowse()});
+  browseMq.on('close',()=>{mqOk=false;renderBrowse()});
+  browseMq.on('message',(t,m)=>{
+    const code=t.slice(TOPIC.length);
+    if(!/^[a-z0-9]{4,8}$/.test(code))return;
+    const raw=m.toString();
+    if(!raw){streams.delete(code)}
+    else{try{const o=JSON.parse(raw);streams.set(code,{code,title:String(o.title||'').slice(0,40),host:String(o.host||'').slice(0,20),viewers:Math.max(0,+o.viewers||0),max:Math.max(1,+o.max||8),ts:+o.ts||0})}catch(e){}}
+    renderBrowse();
+  });
+  setInterval(renderBrowse,5000);
+  renderBrowse();
+}
+function stopBrowse(){if(browseMq){try{browseMq.end(true)}catch(e){}browseMq=null}}
+function listStream(code){
+  if(!$('listed').checked||typeof mqtt==='undefined')return;
+  myCode=code;
+  const info={code,title:$('stitle').value.trim().slice(0,40)||'Untitled stream',host:$('hname').value.trim().slice(0,20)||'Host',max:MAX_VIEWERS};
+  const topic=TOPIC+code;
+  hostMq=mqtt.connect(BROKER,{clientId:'sl-h-'+code,will:{topic,payload:'',retain:true,qos:0},reconnectPeriod:3000,keepalive:20});
+  publishNow=()=>{if(hostMq&&hostMq.connected)hostMq.publish(topic,JSON.stringify({...info,viewers:viewers.size,ts:Date.now()}),{retain:true})};
+  hostMq.on('connect',publishNow);
+  pubTimer=setInterval(publishNow,30000);
+}
+function unlistStream(){
+  clearInterval(pubTimer);publishNow=null;
+  if(!hostMq)return;
+  const m=hostMq;hostMq=null;
+  if(m.connected)m.publish(TOPIC+myCode,'',{retain:true},()=>m.end());else m.end(true);
+}
 
 const QUALITY={'720p30':{w:1280,h:720,f:30,b:4000000},'1080p30':{w:1920,h:1080,f:30,b:8000000},'1080p60':{w:1920,h:1080,f:60,b:12000000},'1440p30':{w:2560,h:1440,f:30,b:14000000}};
 const Q=()=>QUALITY[$('qsel').value]||QUALITY['1080p30'];
@@ -268,7 +348,7 @@ function preferCodec(call){
   }catch(e){}
 }
 function broadcast(m){viewers.forEach(v=>v.conn.open&&v.conn.send(m))}
-function pushAudience(){const list=[{name:'Host',host:true},...[...viewers.values()].filter(v=>v.name).map(v=>({name:v.name}))];renderAud(list);broadcast({t:'users',list})}
+function pushAudience(){publishNow&&publishNow();const list=[{name:'Host',host:true},...[...viewers.values()].filter(v=>v.name).map(v=>({name:v.name}))];renderAud(list);broadcast({t:'users',list})}
 function goLive(code,tries){
   peer=new Peer(PREFIX+code);
   peer.on('error',e=>{if(e.type==='unavailable-id'&&tries<4){peer.destroy();goLive(Math.random().toString(36).slice(2,8),tries+1)}else addMsg('','Connection problem: '+e.type,true)});
@@ -277,7 +357,7 @@ function goLive(code,tries){
     $('title').textContent='Room '+code;$('link').value=url;$('shareRow').hidden=false;
     setBadge('Live',true);$('vmsg').hidden=true;$('endBtn').textContent='End stream';$('endBtn').className='end';
     $('vid').srcObject=stream;$('vid').muted=true;
-    renderAud([{name:'Host',host:true}]);
+    renderAud([{name:'Host',host:true}]);listStream(code);
     addMsg('','You are live. Share the link above.',true);
     addMsg('',stream.getAudioTracks().length?'Audio is being sent. Your own preview is muted to avoid echo.':'Warning: no audio track, viewers will hear nothing.',true);
   });
@@ -314,7 +394,7 @@ function showUnmute(){
   b.onclick=()=>setMute(false);m.append(b);
 }
 function watch(code,name){
-  show('room');$('title').textContent='Room '+code;
+  stopBrowse();show('room');$('title').textContent='Room '+code;
   $('vmsg').textContent='Joining…';setBadge('Connecting',false);
   peer=new Peer();
   peer.on('error',e=>{$('vmsg').textContent=e.type==='peer-unavailable'?'This stream is not live. Check the room code.':'Connection problem: '+e.type;setBadge('Offline',false)});
@@ -372,7 +452,7 @@ $('screenBtn').onclick=shareScreen;
 $('liveBtn').onclick=()=>{
   if(!stream){$('setupErr').textContent='Pick a source first.';return}
   if(!stream.getAudioTracks().length&&!confirm('There is no audio in this stream, so viewers will hear nothing. Go live anyway?'))return;
-  stopMeter();
+  stopMeter();stopBrowse();
   /* 'detail' keeps dark overlays (like line-up screens) sharp instead of smeared */
   stream.getVideoTracks().forEach(t=>{try{t.contentHint='detail'}catch(e){}});
   show('room');goLive(Math.random().toString(36).slice(2,8),0);
@@ -390,6 +470,7 @@ function endStream(){
   if(isHost){
     if(!confirm('End the stream for everyone?'))return;
     broadcast({t:'end'});
+    unlistStream();
     stopStream();
   }
   setTimeout(()=>{try{peer&&peer.destroy()}catch(e){}location.href=location.pathname},isHost?300:0);
@@ -399,6 +480,7 @@ $('endBtn').onclick=endStream;
 $('sendBtn').onclick=sendChat;
 $('chatIn').onkeydown=e=>{if(e.key==='Enter')sendChat()};
 $('copyBtn').onclick=()=>{navigator.clipboard.writeText($('link').value).then(()=>{$('copyBtn').textContent='Copied'})};
+startBrowse();
 const room=new URLSearchParams(location.search).get('room');
 if(room){$('code').value=room;$('watchBtn').focus()}
 </script>
