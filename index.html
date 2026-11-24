@@ -122,8 +122,8 @@ video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
 <script>
 const $=id=>document.getElementById(id);
 /* Relay tree: host feeds MAX_DIRECT viewers, each relay viewer feeds RELAY_KIDS more.
-   4 + 8 + 16 + 32 + 64 + 128 = 252 slots over 6 levels, so 200 fits. */
-const PREFIX='stagelive-',MAX_VIEWERS=200,MAX_DIRECT=4,RELAY_KIDS=2,RELAY_BITRATE=3000000;
+   4 + 16 + 64 + 256 + 1024 = 1364 slots over 5 levels, so 700 fits. */
+const PREFIX='stagelive-',MAX_VIEWERS=700,MAX_DIRECT=4,RELAY_KIDS=4,RELAY_BITRATE=2000000;
 let peer,stream,isHost=false,myName='Viewer',viewers=new Map();
 let meterCtx=null,meterRaf=0,mixCtx=null;
 
@@ -195,7 +195,7 @@ const Q=()=>QUALITY[$('qsel').value]||QUALITY['1080p30'];
 function show(id){document.querySelectorAll('.screen').forEach(s=>s.classList.toggle('on',s.id===id))}
 function addMsg(name,text,sys){const d=document.createElement('div');if(sys){d.className='sys';d.textContent=text}else{const b=document.createElement('b');b.textContent=name+': ';d.append(b,document.createTextNode(text))}const c=$('chat');c.append(d);while(c.children.length>300)c.firstChild.remove();c.scrollTop=c.scrollHeight}
 function setBadge(t,live){$('badge').textContent=t;$('badge').classList.toggle('off',!live)}
-function renderAud(list){const a=$('aud');a.textContent='';const n=document.createElement('span');n.className='cnt';n.textContent=list.length+' here';a.append(n);list.forEach(u=>{const s=document.createElement('span');s.textContent=u.name;if(u.host)s.className='host';a.append(s)})}
+function renderAud(list,total){const a=$('aud');a.textContent='';const n=document.createElement('span');n.className='cnt';n.textContent=(total||list.length)+' here';a.append(n);list.forEach(u=>{const s=document.createElement('span');s.textContent=u.name;if(u.host)s.className='host';a.append(s)})}
 
 /* ---------- Audio level meter (host setup) ---------- */
 function stopMeter(){
@@ -362,9 +362,10 @@ function pushAudience(){
   /* debounced: a surge of joins sends one list, not one per join */
   clearTimeout(audTimer);
   audTimer=setTimeout(()=>{
-    const list=[{name:'Host',host:true},...[...viewers.values()].filter(v=>v.name).map(v=>({name:v.name}))];
-    renderAud(list);broadcast({t:'users',list});
-  },1000);
+    const all=[{name:'Host',host:true},...[...viewers.values()].filter(v=>v.name).map(v=>({name:v.name}))];
+    const list=all.slice(0,60),n=all.length;   /* names capped so 700 viewers stay light */
+    renderAud(list,n);broadcast({t:'users',list,n});
+  },3000);
 }
 function depth(id){let d=0,g=0;while(id&&id!=='host'&&g++<50){const v=viewers.get(id);if(!v)break;id=v.parent;d++}return d}
 function subtree(id){const s=new Set([id]);let g=true;while(g){g=false;viewers.forEach((v,k)=>{if(!s.has(k)&&s.has(v.parent)){s.add(k);g=true}})}return s}
@@ -445,7 +446,7 @@ function callKid(k){
 }
 function onData(d){
   if(d.t==='chat')addMsg(d.name,d.text,d.sys);
-  else if(d.t==='users')renderAud(d.list);
+  else if(d.t==='users')renderAud(d.list,d.n);
   else if(d.t==='adopt'){if(relayStream)callKid(d);else pendingKids.push(d)}
   else if(d.t==='end'){ended=true;$('vmsg').hidden=false;$('vmsg').textContent='The host ended the stream.';setBadge('Ended',false)}
   else if(d.t==='full'){ended=true;$('vmsg').textContent='This stage is full right now (max '+MAX_VIEWERS+' viewers).';setBadge('Full',false)}
