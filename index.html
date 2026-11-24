@@ -140,7 +140,6 @@ function startMeter(s){
   }catch(e){}
 }
 
-/* ---------- Host ---------- */
 /* ---------- Mic volume boost (gain + limiter so it never distorts) ---------- */
 let gainCtx=null,gainNode=null,rawAudio=null;
 function boostAudio(s){
@@ -171,6 +170,8 @@ function permMsg(errs){
   const hints={NotAllowedError:'blocked. Click the lock icon in the address bar, set it to Allow, then press the button below',NotFoundError:'no device found',NotReadableError:'in use by another app',SecurityError:'blocked by the page security settings'};
   return errs.map(e=>e.what+' '+(hints[e.name]||e.name)).join('. ')+'.';
 }
+
+/* ---------- Host ---------- */
 async function listDevices(){
   const errs=[];
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
@@ -372,7 +373,8 @@ $('liveBtn').onclick=()=>{
   if(!stream){$('setupErr').textContent='Pick a source first.';return}
   if(!stream.getAudioTracks().length&&!confirm('There is no audio in this stream, so viewers will hear nothing. Go live anyway?'))return;
   stopMeter();
-  stream.getVideoTracks().forEach(t=>{try{t.contentHint='motion'}catch(e){}});
+  /* 'detail' keeps dark overlays (like line-up screens) sharp instead of smeared */
+  stream.getVideoTracks().forEach(t=>{try{t.contentHint='detail'}catch(e){}});
   show('room');goLive(Math.random().toString(36).slice(2,8),0);
 };
 $('watchBtn').onclick=()=>{const c=$('code').value.trim().toLowerCase();if(!c)return;const n=prompt('Your name for chat?','Viewer')||'Viewer';myName=n.slice(0,20);watch(c,myName)};
